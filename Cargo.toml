@@ -1,0 +1,11 @@
+[package]
+name = "crime"
+description = "Concurrent real-time interface for multimedia engines"
+homepage = "https://github.com/rimelabs/crime"
+repository = "https://github.com/rimelabs/crime"
+version = "0.0.1"
+edition = "2024"
+license = "LGPL-2.1-or-later"
+readme = "README.md"
+
+[dependencies]
