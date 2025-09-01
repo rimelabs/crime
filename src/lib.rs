@@ -14,17 +14,29 @@
 use async_stream::stream;
 use futures::StreamExt;
 use futures::stream::Stream;
+use half::f16;
 use rubato::Resampler;
 use std::boxed::Box;
 use std::pin::Pin;
 
-pub type Mp3Bitrate = mp3lame_encoder::Bitrate;
+pub type Mp3BitRate = mp3lame_encoder::Bitrate;
 pub type Mp3Quality = mp3lame_encoder::Quality;
 
+pub enum PcmBitDepth {
+    Float16,
+    Float32,
+}
+
+impl Default for PcmBitDepth {
+    fn default() -> Self {
+        Self::Float32
+    }
+}
+
 pub enum Encoding {
-    PCM,
-    WAV,
-    MP3(Mp3Bitrate, Mp3Quality),
+    PCM(PcmBitDepth),
+    WAV(PcmBitDepth),
+    MP3(Mp3BitRate, Mp3Quality),
 }
 
 /// Represents an audio stream with a specific sample rate.
@@ -133,30 +145,38 @@ async fn encode<'a>(
     encoding: Encoding,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     match encoding {
-        Encoding::PCM => encode_as_pcm(samples).await,
-        Encoding::WAV => encode_as_wav(samples, sample_rate).await,
-        Encoding::MP3(bitrate, quality) => {
-            encode_as_mp3(samples, sample_rate, bitrate, quality).await
+        Encoding::PCM(bit_depth) => encode_as_pcm(samples, bit_depth).await,
+        Encoding::WAV(bit_depth) => encode_as_wav(samples, sample_rate, bit_depth).await,
+        Encoding::MP3(bit_rate, quality) => {
+            encode_as_mp3(samples, sample_rate, bit_rate, quality).await
         }
     }
 }
 
 async fn encode_as_pcm<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
+    bit_depth: PcmBitDepth,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     let mut samples = Box::pin(samples);
     Box::pin(stream! {
       while let Some(sample) = samples.next().await {
-        for sample_byte in sample.to_le_bytes() {
-          yield sample_byte;
+        let sample = match bit_depth {
+            PcmBitDepth::Float16 => Vec::from(f16::from_f32(sample).to_le_bytes()),
+            PcmBitDepth::Float32 => Vec::from(sample.to_le_bytes()),
+        };
+        for sample_byte in sample {
+            yield sample_byte;
         }
-      }
+    }
     })
 }
 
-fn make_wav_header(sample_rate: u32) -> [u8; 44] {
+fn make_wav_header(sample_rate: u32, bit_depth: &PcmBitDepth) -> [u8; 44] {
     let num_channels = 1u16;
-    let bits_per_sample = 32u16;
+    let bits_per_sample = match bit_depth {
+        PcmBitDepth::Float16 => 16u16,
+        PcmBitDepth::Float32 => 32u16,
+    };
     let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample as u32 / 8);
     let block_align = num_channels * (bits_per_sample / 8);
     let data_chunk_size = 0xFFFF_FFFFu32; // Unknown length for streaming
@@ -182,12 +202,13 @@ fn make_wav_header(sample_rate: u32) -> [u8; 44] {
 async fn encode_as_wav<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
+    bit_depth: PcmBitDepth,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     Box::pin(stream! {
-        for &header_byte in &make_wav_header(sample_rate) {
+        for &header_byte in &make_wav_header(sample_rate, &bit_depth) {
             yield header_byte;
         }
-        let mut pcm_stream = encode_as_pcm(samples).await;
+        let mut pcm_stream = encode_as_pcm(samples, bit_depth).await;
         while let Some(sample) = pcm_stream.next().await {
             yield sample;
         }
@@ -197,12 +218,12 @@ async fn encode_as_wav<'a>(
 async fn encode_as_mp3<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
-    bitrate: mp3lame_encoder::Bitrate,
-    quality: mp3lame_encoder::Quality,
+    bit_rate: Mp3BitRate,
+    quality: Mp3Quality,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     let mut mp3_encoder = mp3lame_encoder::Builder::new().expect("Create LAME encoder");
     mp3_encoder.set_num_channels(1).expect("set channels");
-    mp3_encoder.set_brate(bitrate).expect("set bitrate");
+    mp3_encoder.set_brate(bit_rate).expect("set bit_rate");
     mp3_encoder
         .set_sample_rate(sample_rate)
         .expect("set sample rate");
