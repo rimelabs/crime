@@ -37,6 +37,7 @@ pub enum Encoding {
     PCM(PcmBitDepth),
     WAV(PcmBitDepth),
     MP3(Mp3BitRate, Mp3Quality),
+    G711MuLaw,
 }
 
 /// Represents an audio stream with a specific sample rate.
@@ -150,7 +151,59 @@ async fn encode<'a>(
         Encoding::MP3(bit_rate, quality) => {
             encode_as_mp3(samples, sample_rate, bit_rate, quality).await
         }
+        Encoding::G711MuLaw => encode_as_g711_mu_law(samples).await,
     }
+}
+
+/// Encode f32 samples in [-1.0, 1.0] to 8-bit G.711 μ-law bytes.
+///
+/// The implementation follows ITU-T G.711 with μ=255, mapping linear PCM to μ-law.
+/// Input f32 is first clamped to [-1.0, 1.0], scaled to i16 range, then encoded.
+async fn encode_as_g711_mu_law<'a>(
+    samples: impl Stream<Item = f32> + Send + 'a,
+) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+    let mut samples = Box::pin(samples);
+    Box::pin(stream! {
+      while let Some(sample) = samples.next().await {
+        let s = sample.clamp(-1.0, 1.0);
+        // Scale to 16-bit linear PCM range
+        let pcm16 = (s * 32767.0).round() as i16;
+        yield linear_to_mu_law(pcm16);
+      }
+    })
+}
+
+// Convert 16-bit linear PCM to G.711 μ-law (8-bit).
+// Reference: ITU-T G.711.
+fn linear_to_mu_law(pcm_val: i16) -> u8 {
+    // Constants
+    const BIAS: i16 = 0x84; // 132
+    const CLIP: i16 = 32635;
+
+    // Get sign and magnitude
+    let mut pcm = pcm_val;
+    let sign = if pcm < 0 { 2 << 7 } else { 0 };
+
+    pcm = pcm.abs();
+    pcm = pcm.min(CLIP);
+    pcm = pcm + BIAS;
+
+    // Determine exponent (3 bits) and mantissa (4 bits).
+    let exponent = mu_law_exponent((pcm as u16) >> 7);
+    let mantissa = ((pcm >> (exponent + 3)) & 0x0F) as u8;
+    let mu_law = !(sign | (exponent << 4) | mantissa);
+    mu_law
+}
+
+#[inline]
+fn mu_law_exponent(mut value: u16) -> u8 {
+    let mut exp: u8 = 7;
+    while exp > 0 {
+        if value & 0x0100 != 0 { break; }
+        value <<= 1;
+        exp -= 1;
+    }
+    7 - exp
 }
 
 async fn encode_as_pcm<'a>(
