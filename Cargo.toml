@@ -11,5 +11,6 @@ readme = "README.md"
 [dependencies]
 async-stream = "0.3.6"
 futures = "0.3.31"
+half = "2.6.0"
 mp3lame-encoder = "0.2.1"
 rubato = "0.16.2"
