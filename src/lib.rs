@@ -22,22 +22,53 @@ use std::pin::Pin;
 pub type Mp3BitRate = mp3lame_encoder::Bitrate;
 pub type Mp3Quality = mp3lame_encoder::Quality;
 
-pub enum PcmBitDepth {
-    Float16,
-    Float32,
+/// Represents a PCM encoding.
+/// A PCM encoding can be linear or companding (only G.711 μ-law is supported).
+pub enum PcmEncoding {
+    /// Linear PCM.
+    LinearPcm(LinearPcmEncoding),
+    /// G.711 μ-law.
+    G711MuLaw,
 }
 
-impl Default for PcmBitDepth {
+impl Default for PcmEncoding {
     fn default() -> Self {
-        Self::Float32
+        Self::LinearPcm(LinearPcmEncoding::default())
+    }
+}
+
+/// Represents a linear PCM encoding.
+///
+/// All values are in little-endian format.
+/// Float values are clamped between [-1.0, 1.0].
+pub enum LinearPcmEncoding {
+    /// IEEE 754 half-precision floating point.
+    Float16,
+    /// IEEE 754 single-precision floating point.
+    Float32,
+    /// 16-bit signed integer.
+    Int16,
+}
+
+impl Default for LinearPcmEncoding {
+    fn default() -> Self {
+        Self::Int16
     }
 }
 
 pub enum Encoding {
-    PCM(PcmBitDepth),
-    WAV(PcmBitDepth),
-    MP3(Mp3BitRate, Mp3Quality),
-    G711MuLaw,
+    /// Raw stream of PCM samples.
+    Pcm(PcmEncoding),
+    /// Stream of Linear PCM samples with WAV header.
+    Wav(LinearPcmEncoding),
+    /// Stream of MP3 samples.
+    Mp3(Mp3BitRate, Mp3Quality),
+}
+
+impl Default for Encoding {
+    fn default() -> Self {
+        Self::Pcm(PcmEncoding::default())
+    }
 }
 
 /// Represents an audio stream with a specific sample rate.
@@ -146,12 +177,16 @@ async fn encode<'a>(
     encoding: Encoding,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     match encoding {
-        Encoding::PCM(bit_depth) => encode_as_pcm(samples, bit_depth).await,
-        Encoding::WAV(bit_depth) => encode_as_wav(samples, sample_rate, bit_depth).await,
-        Encoding::MP3(bit_rate, quality) => {
+        Encoding::Pcm(PcmEncoding::LinearPcm(pcm_encoding)) => {
+            encode_as_linear_pcm(samples, pcm_encoding).await
+        }
+        Encoding::Pcm(PcmEncoding::G711MuLaw) => encode_as_g711_mu_law(samples).await,
+        Encoding::Wav(linear_pcm_encoding) => {
+            encode_as_wav(samples, sample_rate, linear_pcm_encoding).await
+        }
+        Encoding::Mp3(bit_rate, quality) => {
             encode_as_mp3(samples, sample_rate, bit_rate, quality).await
         }
-        Encoding::G711MuLaw => encode_as_g711_mu_law(samples).await,
     }
 }
 
@@ -199,36 +234,55 @@ fn linear_to_mu_law(pcm_val: i16) -> u8 {
 fn mu_law_exponent(mut value: u16) -> u8 {
     let mut exp: u8 = 7;
     while exp > 0 {
-        if value & 0x0100 != 0 { break; }
+        if value & 0x0100 != 0 {
+            break;
+        }
         value <<= 1;
         exp -= 1;
     }
     7 - exp
 }
 
-async fn encode_as_pcm<'a>(
+async fn encode_as_linear_pcm<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
-    bit_depth: PcmBitDepth,
+    bit_depth: LinearPcmEncoding,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     let mut samples = Box::pin(samples);
     Box::pin(stream! {
-      while let Some(sample) = samples.next().await {
-        let sample = match bit_depth {
-            PcmBitDepth::Float16 => Vec::from(f16::from_f32(sample).to_le_bytes()),
-            PcmBitDepth::Float32 => Vec::from(sample.to_le_bytes()),
-        };
-        for sample_byte in sample {
-            yield sample_byte;
+        while let Some(sample) = samples.next().await {
+            let sample = sample.clamp(-1.0, 1.0);
+            match bit_depth {
+                LinearPcmEncoding::Float16 => {
+                    let sample = f16::from_f32(sample);
+                    for byte in sample.to_le_bytes() {
+                        yield byte;
+                    }
+                }
+                LinearPcmEncoding::Float32 => {
+                    for byte in sample.to_le_bytes() {
+                        yield byte;
+                    }
+                }
+                LinearPcmEncoding::Int16 => {
+                    let sample = (sample * 32767.0).round() as i16;
+                    for byte in sample.to_le_bytes() {
+                        yield byte;
+                    }
+                }
+            };
         }
-    }
     })
 }
 
-fn make_wav_header(sample_rate: u32, bit_depth: &PcmBitDepth) -> [u8; 44] {
+fn make_wav_header(sample_rate: u32, linear_pcm_encoding: &LinearPcmEncoding) -> [u8; 44] {
     let num_channels = 1u16;
-    let bits_per_sample = match bit_depth {
-        PcmBitDepth::Float16 => 16u16,
-        PcmBitDepth::Float32 => 32u16,
+    let bits_per_sample = match linear_pcm_encoding {
+        LinearPcmEncoding::Float16 | LinearPcmEncoding::Int16 => 16u16,
+        LinearPcmEncoding::Float32 => 32u16,
+    };
+    let audio_format = match linear_pcm_encoding {
+        LinearPcmEncoding::Int16 => 1u16,
+        LinearPcmEncoding::Float16 | LinearPcmEncoding::Float32 => 3u16,
     };
     let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample as u32 / 8);
     let block_align = num_channels * (bits_per_sample / 8);
@@ -241,7 +295,7 @@ fn make_wav_header(sample_rate: u32, bit_depth: &PcmBitDepth) -> [u8; 44] {
     header[8..12].copy_from_slice(b"WAVE");
     header[12..16].copy_from_slice(b"fmt ");
     header[16..20].copy_from_slice(&0x10u32.to_le_bytes()); // Subchunk1Size
-    header[20..22].copy_from_slice(&3u16.to_le_bytes()); // IEEE float
+    header[20..22].copy_from_slice(&audio_format.to_le_bytes());
     header[22..24].copy_from_slice(&num_channels.to_le_bytes());
     header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
     header[28..32].copy_from_slice(&byte_rate.to_le_bytes());
@@ -255,13 +309,13 @@ fn make_wav_header(sample_rate: u32, bit_depth: &PcmBitDepth) -> [u8; 44] {
 async fn encode_as_wav<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
-    bit_depth: PcmBitDepth,
+    linear_pcm_encoding: LinearPcmEncoding,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     Box::pin(stream! {
-        for &header_byte in &make_wav_header(sample_rate, &bit_depth) {
+        for &header_byte in &make_wav_header(sample_rate, &linear_pcm_encoding) {
             yield header_byte;
         }
-        let mut pcm_stream = encode_as_pcm(samples, bit_depth).await;
+        let mut pcm_stream = encode_as_linear_pcm(samples, linear_pcm_encoding).await;
         while let Some(sample) = pcm_stream.next().await {
             yield sample;
         }
