@@ -15,8 +15,14 @@ Current functionalities:
 
 * Input and outputs in `futures::Stream`.
 * Resampling.
-* Audio codec (PCM, WAV, MP3).
+* Streaming audio codec (PCM, WAV, MP3).
+* Time scaling (using WSOLA).
 
-There are also concrete plans to support:
+Supported codecs:
 
-* Tempo adjustment for speech signals.
+* Headerless sample stream
+  * Linear PCM (`i16`, `f16`, `f32`, all little-endian)
+  * G.711 μ-law
+* MP3
+* WAV
+  * Linear PCM (`i16`, `f16`, `f32`, all little-endian)

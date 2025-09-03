@@ -18,6 +18,8 @@ use half::f16;
 use rubato::Resampler;
 use std::boxed::Box;
 use std::pin::Pin;
+mod wsola;
+use wsola::time_scale;
 
 pub type Mp3BitRate = mp3lame_encoder::Bitrate;
 pub type Mp3Quality = mp3lame_encoder::Quality;
@@ -78,11 +80,11 @@ impl Default for Encoding {
 ///
 /// # Fields
 ///
-/// * `sample_rate` - The sample rate of the audio stream, in Hz.
 /// * `stream` - The input audio samples as a pinned, boxed stream of `f32` values.
+/// * `sample_rate` - The sample rate of the audio stream, in Hz.
 pub struct AudioStream<'a> {
-    sample_rate: u32,
     stream: Pin<Box<dyn Stream<Item = f32> + Send + 'a>>,
+    sample_rate: u32,
 }
 
 impl<'a> AudioStream<'a> {
@@ -112,6 +114,8 @@ impl<'a> AudioStream<'a> {
     /// # Arguments
     ///
     /// * `sample_rate` - The desired output sample rate in Hz.
+    /// * `time_scale_factor` - The time scale factor to apply to the audio stream. A value above
+    ///   1.0 speeds up the audio, a value below 1.0 slows it down.
     /// * `encoding` - The desired output encoding format.
     ///
     /// # Returns
@@ -120,9 +124,21 @@ impl<'a> AudioStream<'a> {
     pub async fn commit(
         self,
         sample_rate: u32,
+        time_scale_factor: f32,
         encoding: Encoding,
     ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
-        let resampled_stream = resample(self.stream, self.sample_rate, sample_rate).await;
+        let time_scaled_stream = if (time_scale_factor - 1.0).abs() > f32::EPSILON {
+            time_scale(self.stream, time_scale_factor, self.sample_rate).await
+        } else {
+            self.stream
+        };
+
+        let resampled_stream = if self.sample_rate != sample_rate {
+            resample(time_scaled_stream, self.sample_rate, sample_rate).await
+        } else {
+            time_scaled_stream
+        };
+
         encode(resampled_stream, sample_rate, encoding).await
     }
 }
