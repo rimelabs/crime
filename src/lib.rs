@@ -17,6 +17,7 @@ use futures::stream::Stream;
 use half::f16;
 use rubato::Resampler;
 use std::boxed::Box;
+use std::fmt::Debug;
 use std::pin::Pin;
 mod wsola;
 use wsola::time_scale;
@@ -26,6 +27,7 @@ pub type Mp3Quality = mp3lame_encoder::Quality;
 
 /// Represents a PCM encoding.
 /// A PCM encoding can be linear or companding (only G.711 μ-law is supported).
+#[derive(Clone, Debug)]
 pub enum PcmEncoding {
     /// Linear PCM.
     LinearPcm(LinearPcmEncoding),
@@ -43,6 +45,7 @@ impl Default for PcmEncoding {
 ///
 /// All values are in little-endian format.
 /// Float values are clamped between [-1.0, 1.0].
+#[derive(Clone, Debug)]
 pub enum LinearPcmEncoding {
     /// IEEE 754 half-precision floating point.
     Float16,
@@ -58,6 +61,7 @@ impl Default for LinearPcmEncoding {
     }
 }
 
+#[derive(Clone)]
 pub enum Encoding {
     /// Raw stream of PCM samples.
     Pcm(PcmEncoding),
@@ -70,6 +74,36 @@ pub enum Encoding {
 impl Default for Encoding {
     fn default() -> Self {
         Self::Pcm(PcmEncoding::default())
+    }
+}
+
+impl Debug for Encoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Encoding::Pcm(pcm_encoding) => write!(f, "Pcm({:?})", pcm_encoding),
+            Encoding::Wav(linear_pcm_encoding) => write!(f, "Wav({:?})", linear_pcm_encoding),
+            Encoding::Mp3(bit_rate, quality) => write!(
+                f,
+                "Mp3({}kbps, quality={})",
+                *bit_rate as u16,
+                mp3_quality_str(*quality)
+            ),
+        }
+    }
+}
+
+fn mp3_quality_str(quality: Mp3Quality) -> &'static str {
+    match quality {
+        Mp3Quality::Best => "Best",
+        Mp3Quality::SecondBest => "SecondBest",
+        Mp3Quality::NearBest => "NearBest",
+        Mp3Quality::VeryNice => "VeryNice",
+        Mp3Quality::Nice => "Nice",
+        Mp3Quality::Good => "Good",
+        Mp3Quality::Decent => "Decent",
+        Mp3Quality::Ok => "Ok",
+        Mp3Quality::SecondWorst => "SecondWorst",
+        Mp3Quality::Worst => "Worst",
     }
 }
 
