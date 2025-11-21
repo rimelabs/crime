@@ -12,6 +12,7 @@
 //! The main entry point is [`AudioStream`].
 
 use async_stream::stream;
+use audio_codec_algorithms::encode_ulaw;
 use futures::StreamExt;
 use futures::stream::Stream;
 use half::f16;
@@ -253,44 +254,9 @@ async fn encode_as_g711_mu_law<'a>(
         let s = sample.clamp(-1.0, 1.0);
         // Scale to 16-bit linear PCM range
         let pcm16 = (s * 32767.0).round() as i16;
-        yield linear_to_mu_law(pcm16);
+        yield encode_ulaw(pcm16);
       }
     })
-}
-
-// Convert 16-bit linear PCM to G.711 μ-law (8-bit).
-// Reference: ITU-T G.711.
-fn linear_to_mu_law(pcm_val: i16) -> u8 {
-    // Constants
-    const BIAS: i16 = 0x84; // 132
-    const CLIP: i16 = 32635;
-
-    // Get sign and magnitude
-    let mut pcm = pcm_val;
-    let sign = if pcm < 0 { 2 << 7 } else { 0 };
-
-    pcm = pcm.abs();
-    pcm = pcm.min(CLIP);
-    pcm = pcm + BIAS;
-
-    // Determine exponent (3 bits) and mantissa (4 bits).
-    let exponent = mu_law_exponent((pcm as u16) >> 7);
-    let mantissa = ((pcm >> (exponent + 3)) & 0x0F) as u8;
-    let mu_law = !(sign | (exponent << 4) | mantissa);
-    mu_law
-}
-
-#[inline]
-fn mu_law_exponent(mut value: u16) -> u8 {
-    let mut exp: u8 = 7;
-    while exp > 0 {
-        if value & 0x0100 != 0 {
-            break;
-        }
-        value <<= 1;
-        exp -= 1;
-    }
-    7 - exp
 }
 
 async fn encode_as_linear_pcm<'a>(
