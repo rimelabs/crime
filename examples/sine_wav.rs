@@ -4,7 +4,7 @@ use std::f32::consts::TAU;
 use std::io::{self, Write};
 use std::time::Duration;
 
-use crime::{AudioStream, Encoding, LinearPcmEncoding};
+use crime::{AudioFormat, AudioStream, LinearPcmEncoding};
 use futures::StreamExt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .commit(
                 OUTPUT_SAMPLE_RATE,
                 TIME_SCALE,
-                Encoding::Wav(LinearPcmEncoding::Int16),
+                AudioFormat::Wav(LinearPcmEncoding::Int16),
             )
             .await;
 

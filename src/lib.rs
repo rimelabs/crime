@@ -20,11 +20,16 @@ use rubato::Resampler;
 use std::boxed::Box;
 use std::fmt::Debug;
 use std::pin::Pin;
+mod opus;
+mod webm;
 mod wsola;
 use wsola::time_scale;
 
 pub type Mp3BitRate = mp3lame_encoder::Bitrate;
 pub type Mp3Quality = mp3lame_encoder::Quality;
+
+pub type OpusApplication = ::opus::Application;
+pub type OpusBitrate = ::opus::Bitrate;
 
 /// Represents a PCM encoding.
 /// A PCM encoding can be linear or companding (only G.711 μ-law is supported).
@@ -62,33 +67,49 @@ impl Default for LinearPcmEncoding {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum OggContainer {
+    Opus(OpusApplication, OpusBitrate),
+}
+
+#[derive(Clone, Debug)]
+pub enum WebmContainer {
+    Opus(OpusApplication, OpusBitrate),
+}
+
 #[derive(Clone)]
-pub enum Encoding {
+pub enum AudioFormat {
     /// Raw stream of PCM samples.
     Pcm(PcmEncoding),
     /// Stream of Linear PCM samples with WAV header.
     Wav(LinearPcmEncoding),
     /// Stream of MP3 samples.
     Mp3(Mp3BitRate, Mp3Quality),
+    /// Stream of Opus samples in an Ogg container.
+    Ogg(OggContainer),
+    /// Stream of Opus samples in a WebM container.
+    Webm(WebmContainer),
 }
 
-impl Default for Encoding {
+impl Default for AudioFormat {
     fn default() -> Self {
         Self::Pcm(PcmEncoding::default())
     }
 }
 
-impl Debug for Encoding {
+impl Debug for AudioFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Encoding::Pcm(pcm_encoding) => write!(f, "Pcm({:?})", pcm_encoding),
-            Encoding::Wav(linear_pcm_encoding) => write!(f, "Wav({:?})", linear_pcm_encoding),
-            Encoding::Mp3(bit_rate, quality) => write!(
+            AudioFormat::Pcm(pcm_encoding) => write!(f, "Pcm({:?})", pcm_encoding),
+            AudioFormat::Wav(linear_pcm_encoding) => write!(f, "Wav({:?})", linear_pcm_encoding),
+            AudioFormat::Mp3(bit_rate, quality) => write!(
                 f,
                 "Mp3({}kbps, quality={})",
                 *bit_rate as u16,
                 mp3_quality_str(*quality)
             ),
+            AudioFormat::Ogg(codec) => write!(f, "Ogg({:?})", codec),
+            AudioFormat::Webm(codec) => write!(f, "WebM({:?})", codec),
         }
     }
 }
@@ -151,7 +172,7 @@ impl<'a> AudioStream<'a> {
     /// * `sample_rate` - The desired output sample rate in Hz.
     /// * `time_scale_factor` - The time scale factor to apply to the audio stream. A value above
     ///   1.0 speeds up the audio, a value below 1.0 slows it down.
-    /// * `encoding` - The desired output encoding format.
+    /// * `format` - The desired output audio format.
     ///
     /// # Returns
     ///
@@ -160,7 +181,7 @@ impl<'a> AudioStream<'a> {
         self,
         sample_rate: u32,
         time_scale_factor: f32,
-        encoding: Encoding,
+        format: AudioFormat,
     ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
         let time_scaled_stream = if (time_scale_factor - 1.0).abs() > f32::EPSILON {
             time_scale(self.stream, time_scale_factor, self.sample_rate).await
@@ -174,7 +195,7 @@ impl<'a> AudioStream<'a> {
             time_scaled_stream
         };
 
-        encode(resampled_stream, sample_rate, encoding).await
+        encode(resampled_stream, sample_rate, format).await
     }
 }
 
@@ -225,18 +246,24 @@ async fn resample<'a>(
 async fn encode<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
-    encoding: Encoding,
+    format: AudioFormat,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
-    match encoding {
-        Encoding::Pcm(PcmEncoding::LinearPcm(pcm_encoding)) => {
+    match format {
+        AudioFormat::Pcm(PcmEncoding::LinearPcm(pcm_encoding)) => {
             encode_as_linear_pcm(samples, pcm_encoding).await
         }
-        Encoding::Pcm(PcmEncoding::G711MuLaw) => encode_as_g711_mu_law(samples).await,
-        Encoding::Wav(linear_pcm_encoding) => {
+        AudioFormat::Pcm(PcmEncoding::G711MuLaw) => encode_as_g711_mu_law(samples).await,
+        AudioFormat::Wav(linear_pcm_encoding) => {
             encode_as_wav(samples, sample_rate, linear_pcm_encoding).await
         }
-        Encoding::Mp3(bit_rate, quality) => {
+        AudioFormat::Mp3(bit_rate, quality) => {
             encode_as_mp3(samples, sample_rate, bit_rate, quality).await
+        }
+        AudioFormat::Ogg(OggContainer::Opus(application, bitrate)) => {
+            opus::encode_opus_as_ogg(samples, sample_rate, application, bitrate).await
+        }
+        AudioFormat::Webm(WebmContainer::Opus(application, bitrate)) => {
+            opus::encode_opus_as_webm(samples, sample_rate, application, bitrate).await
         }
     }
 }
