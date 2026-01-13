@@ -339,13 +339,8 @@ pub async fn encode_opus_as_webm<'a>(
         let tracks_el = make_tracks_element(sample_rate);
         for byte in tracks_el { yield byte; }
 
-        // 5. Clusters
-        let mut cluster_timecode = 0u64; // Absolute time
-        let mut current_cluster_start = 0u64;
-        let mut cluster_data = Vec::new();
-
-        // Start first cluster
-        cluster_data.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_ID, 0));
+        // 5. Clusters - one per packet for minimal latency
+        let mut cluster_timecode = 0u64;
 
         while let Some(packet_result) = opus_packets.next().await {
             let packet = match packet_result {
@@ -355,32 +350,15 @@ pub async fn encode_opus_as_webm<'a>(
                     return;
                 }
             };
-            let opus_data = packet.data;
-            // Frame duration 20ms
-            let block_duration = 20u64;
 
-            // Check if cluster is full (e.g. >= 1000ms)
-            if cluster_timecode - current_cluster_start >= 1000 {
-                 // Flush
-                 let cluster_el = webm::make_element(webm::CLUSTER_ID, &cluster_data);
-                 for byte in cluster_el { yield byte; }
+            let mut cluster_data = Vec::new();
+            cluster_data.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_ID, cluster_timecode));
+            cluster_data.extend_from_slice(&webm::make_simple_block(1, 0, &packet.data));
 
-                 current_cluster_start = cluster_timecode;
-                 cluster_data.clear();
-                 cluster_data.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_ID, current_cluster_start));
-            }
+            let cluster_el = webm::make_element(webm::CLUSTER_ID, &cluster_data);
+            for byte in cluster_el { yield byte; }
 
-            let relative_tc = (cluster_timecode - current_cluster_start) as i16;
-
-            cluster_data.extend_from_slice(&webm::make_simple_block(1, relative_tc, &opus_data));
-
-            cluster_timecode += block_duration;
-        }
-
-        // Flush last cluster
-        if cluster_data.len() > 10 { // Ensure we have data beyond just Timecode
-             let cluster_el = webm::make_element(webm::CLUSTER_ID, &cluster_data);
-             for byte in cluster_el { yield byte; }
+            cluster_timecode += 20; // 20ms per frame
         }
     })
 }
