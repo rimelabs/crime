@@ -241,9 +241,13 @@ pub async fn encode_opus_as_ogg<'a>(
 
 pub fn make_webm_header() -> Vec<u8> {
     let mut header = Vec::new();
-    header.extend_from_slice(&webm::make_string_element(0x4286, "webm")); // EBMLDocType
+    header.extend_from_slice(&webm::make_uint_element(0x4286, 1)); // EBMLVersion
     header.extend_from_slice(&webm::make_uint_element(0x42F7, 1)); // EBMLReadVersion
-    header.extend_from_slice(&webm::make_uint_element(0x4287, 1)); // EBMLDocTypeVersion
+    header.extend_from_slice(&webm::make_uint_element(0x42F2, 4)); // EBMLMaxIDLength
+    header.extend_from_slice(&webm::make_uint_element(0x42F3, 8)); // EBMLMaxSizeLength
+    header.extend_from_slice(&webm::make_string_element(0x4282, "webm")); // DocType
+    header.extend_from_slice(&webm::make_uint_element(0x4287, 4)); // DocTypeVersion
+    header.extend_from_slice(&webm::make_uint_element(0x4285, 2)); // DocTypeReadVersion
     webm::make_element(webm::EBML_ID, &header)
 }
 
