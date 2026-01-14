@@ -263,7 +263,7 @@ pub fn make_segment_header() -> Vec<u8> {
 pub fn make_info_element() -> Vec<u8> {
     let mut info = Vec::new();
     info.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_SCALE_ID, 1_000_000)); // 1ms
-    let app_string = concat!("crime ", env!("CARGO_PKG_VERSION"));
+    let app_string = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
     info.extend_from_slice(&webm::make_string_element(webm::MUXING_APP_ID, app_string));
     info.extend_from_slice(&webm::make_string_element(webm::WRITING_APP_ID, app_string));
     webm::make_element(webm::INFO_ID, &info)
