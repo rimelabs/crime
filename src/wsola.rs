@@ -116,7 +116,7 @@ pub(crate) async fn time_scale<'a>(
         let mut overlap = ((frame_size as f32) * OVERLAP_FACTOR).round() as usize;
         if overlap >= frame_size { overlap = frame_size.saturating_sub(1); }
         let synth_hop = frame_size - overlap;
-        let analysis_hop = ((synth_hop as f32) * time_scale_factor).round() as usize;
+        let analysis_hop = ((synth_hop as f32) / time_scale_factor).round() as usize;
 
         // Adaptive search window
         let min_delta = (sample_rate as f32 * 0.015).round() as usize;

@@ -199,7 +199,7 @@ impl<'a> AudioStream<'a> {
     ///
     /// * `sample_rate` - The desired output sample rate in Hz.
     /// * `time_scale_factor` - The time scale factor to apply to the audio stream. A value above
-    ///   1.0 speeds up the audio, a value below 1.0 slows it down.
+    ///   1.0 slows down the audio, a value below 1.0 speeds it up.
     /// * `format` - The desired output audio format.
     ///
     /// # Returns
