@@ -15,14 +15,35 @@ Current functionalities:
 
 * Input and outputs in `futures::Stream`.
 * Resampling.
-* Streaming audio codec (PCM, WAV, MP3).
+* Streaming audio codec (PCM, WAV, MP3, Ogg/Opus, WebM/Opus).
 * Time scaling (using WSOLA).
 
-Supported codecs:
+## Feature flags
 
-* Headerless sample stream
+Each audio format is behind an optional feature flag. No formats are enabled by default.
+
+| Feature | Format | Extra dependencies |
+|---------|--------|--------------------|
+| `pcm`   | Headerless PCM (linear + G.711 μ-law) | `audio-codec-algorithms`, `half` |
+| `wav`   | WAV (linear PCM with header) | `half` |
+| `mp3`   | MP3 | `mp3lame-encoder` |
+| `ogg`   | Ogg/Opus | `opus`, `ogg`, `crc` |
+| `webm`  | WebM/Opus | `opus` |
+
+Example — enable MP3 and WAV only:
+
+```toml
+[dependencies]
+crime = { version = "...", features = ["mp3", "wav"] }
+```
+
+## Supported codecs
+
+* `pcm` — Headerless sample stream
   * Linear PCM (`i16`, `f16`, `f32`, all little-endian)
   * G.711 μ-law
-* MP3
-* WAV
+* `wav` — WAV
   * Linear PCM (`i16`, `f16`, `f32`, all little-endian)
+* `mp3` — MP3
+* `ogg` — Ogg/Opus
+* `webm` — WebM/Opus
