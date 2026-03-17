@@ -12,27 +12,36 @@
 //! The main entry point is [`AudioStream`].
 
 use async_stream::stream;
+#[cfg(feature = "pcm")]
 use audio_codec_algorithms::encode_ulaw;
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use futures::StreamExt;
 use futures::stream::Stream;
+#[cfg(any(feature = "pcm", feature = "wav"))]
 use half::f16;
 use rubato::{Fft, FixedSync, Resampler};
 use std::fmt::Debug;
 use std::pin::Pin;
+#[cfg(any(feature = "ogg", feature = "webm"))]
 mod opus;
+#[cfg(feature = "webm")]
 mod webm;
 mod wsola;
 use wsola::time_scale;
 
+#[cfg(feature = "mp3")]
 pub type Mp3BitRate = mp3lame_encoder::Bitrate;
+#[cfg(feature = "mp3")]
 pub type Mp3Quality = mp3lame_encoder::Quality;
 
+#[cfg(any(feature = "ogg", feature = "webm"))]
 pub type OpusApplication = ::opus::Application;
+#[cfg(any(feature = "ogg", feature = "webm"))]
 pub type OpusBitrate = ::opus::Bitrate;
 
 /// Represents a PCM encoding.
 /// A PCM encoding can be linear or companding (only G.711 μ-law is supported).
+#[cfg(feature = "pcm")]
 #[derive(Clone, Debug)]
 pub enum PcmEncoding {
     /// Linear PCM.
@@ -41,6 +50,7 @@ pub enum PcmEncoding {
     G711MuLaw,
 }
 
+#[cfg(feature = "pcm")]
 impl Default for PcmEncoding {
     fn default() -> Self {
         Self::LinearPcm(LinearPcmEncoding::default())
@@ -51,6 +61,7 @@ impl Default for PcmEncoding {
 ///
 /// All values are in little-endian format.
 /// Float values are clamped between [-1.0, 1.0].
+#[cfg(any(feature = "pcm", feature = "wav"))]
 #[derive(Clone, Debug)]
 pub enum LinearPcmEncoding {
     /// IEEE 754 half-precision floating point.
@@ -61,17 +72,20 @@ pub enum LinearPcmEncoding {
     Int16,
 }
 
+#[cfg(any(feature = "pcm", feature = "wav"))]
 impl Default for LinearPcmEncoding {
     fn default() -> Self {
         Self::Int16
     }
 }
 
+#[cfg(feature = "ogg")]
 #[derive(Clone, Debug)]
 pub enum OggContainer {
     Opus(OpusApplication, OpusBitrate),
 }
 
+#[cfg(feature = "webm")]
 #[derive(Clone, Debug)]
 pub enum WebmContainer {
     Opus(OpusApplication, OpusBitrate),
@@ -80,17 +94,23 @@ pub enum WebmContainer {
 #[derive(Clone)]
 pub enum AudioFormat {
     /// Raw stream of PCM samples.
+    #[cfg(feature = "pcm")]
     Pcm(PcmEncoding),
     /// Stream of Linear PCM samples with WAV header.
+    #[cfg(feature = "wav")]
     Wav(LinearPcmEncoding),
     /// Stream of MP3 samples.
+    #[cfg(feature = "mp3")]
     Mp3(Mp3BitRate, Mp3Quality),
     /// Stream of Opus samples in an Ogg container.
+    #[cfg(feature = "ogg")]
     Ogg(OggContainer),
     /// Stream of Opus samples in a WebM container.
+    #[cfg(feature = "webm")]
     Webm(WebmContainer),
 }
 
+#[cfg(feature = "pcm")]
 impl Default for AudioFormat {
     fn default() -> Self {
         Self::Pcm(PcmEncoding::default())
@@ -98,22 +118,30 @@ impl Default for AudioFormat {
 }
 
 impl Debug for AudioFormat {
+    #[allow(unreachable_patterns, unused_variables)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "pcm")]
             AudioFormat::Pcm(pcm_encoding) => write!(f, "Pcm({:?})", pcm_encoding),
+            #[cfg(feature = "wav")]
             AudioFormat::Wav(linear_pcm_encoding) => write!(f, "Wav({:?})", linear_pcm_encoding),
+            #[cfg(feature = "mp3")]
             AudioFormat::Mp3(bit_rate, quality) => write!(
                 f,
                 "Mp3({}kbps, quality={})",
                 *bit_rate as u16,
                 mp3_quality_str(*quality)
             ),
+            #[cfg(feature = "ogg")]
             AudioFormat::Ogg(codec) => write!(f, "Ogg({:?})", codec),
+            #[cfg(feature = "webm")]
             AudioFormat::Webm(codec) => write!(f, "WebM({:?})", codec),
+            _ => unreachable!(),
         }
     }
 }
 
+#[cfg(feature = "mp3")]
 fn mp3_quality_str(quality: Mp3Quality) -> &'static str {
     match quality {
         Mp3Quality::Best => "Best",
@@ -253,25 +281,32 @@ async fn resample<'a>(
     )
 }
 
+#[allow(unused_variables)]
 async fn encode<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
     format: AudioFormat,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
     match format {
+        #[cfg(feature = "pcm")]
         AudioFormat::Pcm(PcmEncoding::LinearPcm(pcm_encoding)) => {
             encode_as_linear_pcm(samples, pcm_encoding).await
         }
+        #[cfg(feature = "pcm")]
         AudioFormat::Pcm(PcmEncoding::G711MuLaw) => encode_as_g711_mu_law(samples).await,
+        #[cfg(feature = "wav")]
         AudioFormat::Wav(linear_pcm_encoding) => {
             encode_as_wav(samples, sample_rate, linear_pcm_encoding).await
         }
+        #[cfg(feature = "mp3")]
         AudioFormat::Mp3(bit_rate, quality) => {
             encode_as_mp3(samples, sample_rate, bit_rate, quality).await
         }
+        #[cfg(feature = "ogg")]
         AudioFormat::Ogg(OggContainer::Opus(application, bitrate)) => {
             opus::encode_opus_as_ogg(samples, sample_rate, application, bitrate).await
         }
+        #[cfg(feature = "webm")]
         AudioFormat::Webm(WebmContainer::Opus(application, bitrate)) => {
             opus::encode_opus_as_webm(samples, sample_rate, application, bitrate).await
         }
@@ -282,6 +317,7 @@ async fn encode<'a>(
 ///
 /// The implementation follows ITU-T G.711 with μ=255, mapping linear PCM to μ-law.
 /// Input f32 is first clamped to [-1.0, 1.0], scaled to i16 range, then encoded.
+#[cfg(feature = "pcm")]
 async fn encode_as_g711_mu_law<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
 ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
@@ -296,6 +332,7 @@ async fn encode_as_g711_mu_law<'a>(
     })
 }
 
+#[cfg(any(feature = "pcm", feature = "wav"))]
 async fn encode_as_linear_pcm<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     bit_depth: LinearPcmEncoding,
@@ -327,6 +364,7 @@ async fn encode_as_linear_pcm<'a>(
     })
 }
 
+#[cfg(feature = "wav")]
 fn make_wav_header(sample_rate: u32, linear_pcm_encoding: &LinearPcmEncoding) -> [u8; 44] {
     let num_channels = 1u16;
     let bits_per_sample = match linear_pcm_encoding {
@@ -359,6 +397,7 @@ fn make_wav_header(sample_rate: u32, linear_pcm_encoding: &LinearPcmEncoding) ->
     header
 }
 
+#[cfg(feature = "wav")]
 async fn encode_as_wav<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
@@ -375,6 +414,7 @@ async fn encode_as_wav<'a>(
     })
 }
 
+#[cfg(feature = "mp3")]
 async fn encode_as_mp3<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,

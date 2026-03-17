@@ -1,4 +1,6 @@
-use crate::{OpusApplication, OpusBitrate, webm};
+#[cfg(feature = "webm")]
+use crate::webm;
+use crate::{OpusApplication, OpusBitrate};
 use futures::{Stream, StreamExt};
 use opus::Channels as OpusChannels;
 use std::pin::Pin;
@@ -63,7 +65,9 @@ pub async fn encode_opus_stream<'a>(
     }
 }
 
+#[cfg(any(feature = "ogg", feature = "webm"))]
 const OPUS_HEAD_MAGIC: &[u8] = b"OpusHead";
+#[cfg(feature = "ogg")]
 const OPUS_TAGS_MAGIC: &[u8] = b"OpusTags";
 
 pub struct OpusHeader {
@@ -91,6 +95,7 @@ impl OpusHeader {
     }
 }
 
+#[cfg(feature = "ogg")]
 pub fn make_opus_comment_header() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(OPUS_TAGS_MAGIC);
@@ -106,6 +111,7 @@ pub fn make_opus_comment_header() -> Vec<u8> {
     bytes
 }
 
+#[cfg(feature = "ogg")]
 pub async fn encode_opus_as_ogg<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
@@ -239,6 +245,7 @@ pub async fn encode_opus_as_ogg<'a>(
     })
 }
 
+#[cfg(feature = "webm")]
 pub fn make_webm_header() -> Vec<u8> {
     let mut header = Vec::new();
     header.extend_from_slice(&webm::make_uint_element(0x4286, 1)); // EBMLVersion
@@ -251,6 +258,7 @@ pub fn make_webm_header() -> Vec<u8> {
     webm::make_element(webm::EBML_ID, &header)
 }
 
+#[cfg(feature = "webm")]
 pub fn make_segment_header() -> Vec<u8> {
     let mut segment = Vec::new();
     segment.extend_from_slice(&webm::encode_id(webm::SEGMENT_ID));
@@ -260,6 +268,7 @@ pub fn make_segment_header() -> Vec<u8> {
     segment
 }
 
+#[cfg(feature = "webm")]
 pub fn make_info_element() -> Vec<u8> {
     let mut info = Vec::new();
     info.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_SCALE_ID, 1_000_000)); // 1ms
@@ -269,6 +278,7 @@ pub fn make_info_element() -> Vec<u8> {
     webm::make_element(webm::INFO_ID, &info)
 }
 
+#[cfg(feature = "webm")]
 pub fn make_tracks_element(sample_rate: u32) -> Vec<u8> {
     let mut tracks = Vec::new();
     let mut track_entry = Vec::new();
@@ -318,6 +328,7 @@ pub fn make_tracks_element(sample_rate: u32) -> Vec<u8> {
     webm::make_element(webm::TRACKS_ID, &tracks)
 }
 
+#[cfg(feature = "webm")]
 pub async fn encode_opus_as_webm<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
