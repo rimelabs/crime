@@ -26,50 +26,50 @@ pub const TIMECODE_ID: u32 = 0xE7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebmError {
-  VintTooLarge(u64),
+    VintTooLarge(u64),
 }
 
 impl std::fmt::Display for WebmError {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      WebmError::VintTooLarge(value) => write!(f, "value {value} is too large for VINT"),
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WebmError::VintTooLarge(value) => write!(f, "value {value} is too large for VINT"),
+        }
     }
-  }
 }
 
 impl std::error::Error for WebmError {}
 
 /// Generates a VINT (Variable Integer) as bytes.
 pub fn encode_vint(value: u64) -> Result<Vec<u8>, WebmError> {
-  let mut bytes = Vec::new();
-  let mut len = 1;
-  let mut mask = 0x80;
+    let mut bytes = Vec::new();
+    let mut len = 1;
+    let mut mask = 0x80;
 
-  // Find required length
-  loop {
-    if value < mask - 1 {
-      break;
+    // Find required length
+    loop {
+        if value < mask - 1 {
+            break;
+        }
+        mask <<= 7;
+        len += 1;
+        if len > 8 {
+            return Err(WebmError::VintTooLarge(value));
+        }
     }
-    mask <<= 7;
-    len += 1;
-    if len > 8 {
-      return Err(WebmError::VintTooLarge(value));
+
+    let mut marker = 0x80u8;
+    for _ in 1..len {
+        marker >>= 1;
     }
-  }
 
-  let mut marker = 0x80u8;
-  for _ in 1..len {
-    marker >>= 1;
-  }
+    // Construct bytes in big-endian
+    let val_with_marker = value | ((marker as u64) << ((len - 1) * 8));
 
-  // Construct bytes in big-endian
-  let val_with_marker = value | ((marker as u64) << ((len - 1) * 8));
+    for i in (0..len).rev() {
+        bytes.push(((val_with_marker >> (i * 8)) & 0xFF) as u8);
+    }
 
-  for i in (0..len).rev() {
-    bytes.push(((val_with_marker >> (i * 8)) & 0xFF) as u8);
-  }
-
-  Ok(bytes)
+    Ok(bytes)
 }
 
 /// Encodes an Element ID (which is technically a VINT, but usually fixed).
