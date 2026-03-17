@@ -218,7 +218,8 @@ async fn resample<'a>(
     )
     .expect("creating resampler");
     let output_delay = resampler.output_delay();
-    let mut input = Box::pin(samples.chain(futures::stream::repeat(0.0).take(output_delay)));
+    let padding_frames = resampler.input_frames_next();
+    let mut input = Box::pin(samples.chain(futures::stream::repeat(0.0).take(padding_frames)));
     let out_frames_max = resampler.output_frames_max();
     Box::pin(
         stream! {
