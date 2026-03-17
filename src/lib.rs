@@ -13,11 +13,11 @@
 
 use async_stream::stream;
 use audio_codec_algorithms::encode_ulaw;
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use futures::StreamExt;
 use futures::stream::Stream;
 use half::f16;
-use rubato::Resampler;
-use std::boxed::Box;
+use rubato::{Fft, FixedSync, Resampler};
 use std::fmt::Debug;
 use std::pin::Pin;
 mod opus;
@@ -208,33 +208,42 @@ async fn resample<'a>(
         return Box::pin(samples);
     }
     let chunk_size = (20 * input_rate / 1000) as usize;
-    let mut resampler =
-        rubato::FftFixedInOut::<f32>::new(input_rate as usize, output_rate as usize, chunk_size, 1)
-            .expect("creating resampler");
+    let mut resampler = Fft::<f32>::new(
+        input_rate as usize,
+        output_rate as usize,
+        chunk_size,
+        1,
+        1,
+        FixedSync::Both,
+    )
+    .expect("creating resampler");
     let output_delay = resampler.output_delay();
     let mut input = Box::pin(samples.chain(futures::stream::repeat(0.0).take(output_delay)));
+    let out_frames_max = resampler.output_frames_max();
     Box::pin(
         stream! {
-          let mut in_buffer = resampler.input_buffer_allocate(false);
-          let mut out_buffer = resampler.output_buffer_allocate(true);
+          let mut in_data = vec![vec![0.0f32; resampler.input_frames_max()]; 1];
+          let mut out_data = vec![vec![0.0f32; out_frames_max]; 1];
           loop {
             let frames_needed = resampler.input_frames_next();
 
-            in_buffer[0].clear();
+            in_data[0].clear();
             for _ in 0..frames_needed {
               match input.next().await {
-                Some(sample) => in_buffer[0].push(sample),
+                Some(sample) => in_data[0].push(sample),
                 None => break,
               }
             }
-            if in_buffer[0].len() < frames_needed {
+            if in_data[0].len() < frames_needed {
               // No more pending samples. Not going to process the remainder.
               break;
             }
 
+            let in_adapter = SequentialSliceOfVecs::new(&in_data, 1, frames_needed).unwrap();
+            let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut out_data, 1, out_frames_max).unwrap();
             let (_in_frames, out_frames) = resampler.process_into_buffer(
-              &in_buffer, &mut out_buffer, None).unwrap();
-            for sample in out_buffer[0][..out_frames].iter() {
+              &in_adapter, &mut out_adapter, None).unwrap();
+            for sample in out_data[0][..out_frames].iter() {
               yield *sample;
             }
           }
@@ -386,7 +395,6 @@ async fn encode_as_mp3<'a>(
       let mut mp3_out_buffer = Vec::new();
 
       while let Some(chunk) = sample_chunks.next().await {
-        let chunk: Vec<f32> = chunk.into_iter().collect();
         let input = mp3lame_encoder::MonoPcm(&chunk);
 
         mp3_out_buffer.reserve(mp3lame_encoder::max_required_buffer_size(input.0.len()));

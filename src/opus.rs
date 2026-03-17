@@ -36,7 +36,6 @@ pub async fn encode_opus_stream<'a>(
         }
 
         while let Some(chunk) = sample_chunks.next().await {
-            let chunk: Vec<f32> = chunk.into_iter().collect();
             let mut output = [0u8; 4000];
 
             // Handle partial frames by padding
@@ -135,7 +134,7 @@ pub async fn encode_opus_as_ogg<'a>(
         // crc crate's CRC_32_ISO_HDLC is reflected (poly reversed 0xEDB88320 effectively).
         // We need non-reflected 0x04C11DB7.
         // Let's use custom definition to be safe.
-        const OGG_CRC: crc::Algorithm<u32> = crc::Algorithm {
+        const OGG_CRC_ALGO: crc::Algorithm<u32> = crc::Algorithm {
             width: 32,
             poly: 0x04c11db7,
             init: 0,
@@ -145,6 +144,7 @@ pub async fn encode_opus_as_ogg<'a>(
             check: 0,
             residue: 0,
         };
+        let ogg_crc = crc::Crc::<u32>::new(&OGG_CRC_ALGO);
 
         let mut id_page = Vec::new();
         id_page.extend_from_slice(b"OggS");
@@ -160,7 +160,7 @@ pub async fn encode_opus_as_ogg<'a>(
 
         // Calculate CRC
         // Ogg CRC checksum is calculated over the entire page with the checksum field set to 0.
-        let crc = crc::Crc::<u32>::new(&OGG_CRC).checksum(&id_page);
+        let crc = ogg_crc.checksum(&id_page);
         id_page[22..26].copy_from_slice(&crc.to_le_bytes());
 
         for byte in &id_page { yield *byte; }
@@ -179,7 +179,7 @@ pub async fn encode_opus_as_ogg<'a>(
         comment_page.push(comment_packet.len() as u8); // segment (assuming < 255)
         comment_page.extend_from_slice(&comment_packet);
 
-        let crc = crc::Crc::<u32>::new(&OGG_CRC).checksum(&comment_page);
+        let crc = ogg_crc.checksum(&comment_page);
         comment_page[22..26].copy_from_slice(&crc.to_le_bytes());
 
         for byte in &comment_page { yield *byte; }
@@ -229,7 +229,7 @@ pub async fn encode_opus_as_ogg<'a>(
 
             page.extend_from_slice(&opus_data);
 
-            let crc = crc::Crc::<u32>::new(&OGG_CRC).checksum(&page);
+            let crc = ogg_crc.checksum(&page);
             page[22..26].copy_from_slice(&crc.to_le_bytes());
 
             for byte in &page { yield *byte; }
