@@ -117,29 +117,11 @@ pub async fn encode_opus_as_ogg<'a>(
     sample_rate: u32,
     application: OpusApplication,
     bitrate: OpusBitrate,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
     let opus_packets = encode_opus_stream(samples, sample_rate, application, bitrate).await;
     let mut opus_packets = Box::pin(opus_packets);
 
     Box::pin(async_stream::stream! {
-        // Create Ogg Packet Writer manually to avoid stream/RefCell borrow checker/ICE issues.
-        // We will just construct the pages ourselves.
-        // ID Header Page
-        let id_header = OpusHeader {
-            version: 1,
-            channels: 1,
-            pre_skip: 0,
-            input_sample_rate: sample_rate,
-            output_gain: 0,
-            channel_mapping_family: 0,
-        };
-        let id_packet = id_header.to_bytes();
-        // Ogg CRC algorithm:
-        // Width=32, Poly=0x04C11DB7, Init=0, RefIn=False, RefOut=False, XorOut=0
-        // This corresponds to CRC_32_MPEG_2 in some catalogs, or we can define it.
-        // crc crate's CRC_32_ISO_HDLC is reflected (poly reversed 0xEDB88320 effectively).
-        // We need non-reflected 0x04C11DB7.
-        // Let's use custom definition to be safe.
         const OGG_CRC_ALGO: crc::Algorithm<u32> = crc::Algorithm {
             width: 32,
             poly: 0x04c11db7,
@@ -152,6 +134,17 @@ pub async fn encode_opus_as_ogg<'a>(
         };
         let ogg_crc = crc::Crc::<u32>::new(&OGG_CRC_ALGO);
 
+        // ID Header Page
+        let id_header = OpusHeader {
+            version: 1,
+            channels: 1,
+            pre_skip: 0,
+            input_sample_rate: sample_rate,
+            output_gain: 0,
+            channel_mapping_family: 0,
+        };
+        let id_packet = id_header.to_bytes();
+
         let mut id_page = Vec::new();
         id_page.extend_from_slice(b"OggS");
         id_page.push(0); // version
@@ -161,38 +154,38 @@ pub async fn encode_opus_as_ogg<'a>(
         id_page.extend_from_slice(&0u32.to_le_bytes()); // sequence
         id_page.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
         id_page.push(1); // segments
-        id_page.push(id_packet.len() as u8); // segment table (assuming packet < 255 bytes)
+        id_page.push(id_packet.len() as u8);
         id_page.extend_from_slice(&id_packet);
 
-        // Calculate CRC
-        // Ogg CRC checksum is calculated over the entire page with the checksum field set to 0.
         let crc = ogg_crc.checksum(&id_page);
         id_page[22..26].copy_from_slice(&crc.to_le_bytes());
-
-        for byte in &id_page { yield *byte; }
 
         // Comment Header Page
         let comment_packet = make_opus_comment_header();
         let mut comment_page = Vec::new();
         comment_page.extend_from_slice(b"OggS");
-        comment_page.push(0);
-        comment_page.push(0); // type: Normal (continuation not needed for small comment)
+        comment_page.push(0); // version
+        comment_page.push(0); // type: normal
         comment_page.extend_from_slice(&0u64.to_le_bytes()); // granule pos
         comment_page.extend_from_slice(&1u32.to_le_bytes()); // serial
         comment_page.extend_from_slice(&1u32.to_le_bytes()); // sequence
-        comment_page.extend_from_slice(&0u32.to_le_bytes()); // checksum
-        comment_page.push(1);
-        comment_page.push(comment_packet.len() as u8); // segment (assuming < 255)
+        comment_page.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
+        comment_page.push(1); // segments
+        comment_page.push(comment_packet.len() as u8);
         comment_page.extend_from_slice(&comment_packet);
 
         let crc = ogg_crc.checksum(&comment_page);
         comment_page[22..26].copy_from_slice(&crc.to_le_bytes());
 
-        for byte in &comment_page { yield *byte; }
+        // Build preamble (ID + Comment pages) to prepend to first audio page.
+        let mut preamble = Vec::with_capacity(id_page.len() + comment_page.len());
+        preamble.extend_from_slice(&id_page);
+        preamble.extend_from_slice(&comment_page);
 
         // Audio Pages
         let mut granule_position: u64 = 0;
         let mut page_sequence: u32 = 2;
+        let mut first = true;
 
         while let Some(packet_result) = opus_packets.next().await {
             let packet = match packet_result {
@@ -205,21 +198,17 @@ pub async fn encode_opus_as_ogg<'a>(
             let opus_data = packet.data;
             granule_position += packet.frame_size_samples as u64;
 
-            // Construct Audio Page (one packet per page for simplicity)
             let mut page = Vec::new();
             page.extend_from_slice(b"OggS");
-            page.push(0);
-            page.push(0); // type: Normal (or End of Stream if last?)
-            // We don't know if it's last easily here without peeking or checking stream end.
-            // Let's assume normal. If sample_chunks.is_done() ... tricky with async iterator.
+            page.push(0); // version
+            page.push(0); // type: normal
 
             page.extend_from_slice(&granule_position.to_le_bytes());
             page.extend_from_slice(&1u32.to_le_bytes()); // serial
             page.extend_from_slice(&page_sequence.to_le_bytes());
-            page.extend_from_slice(&0u32.to_le_bytes()); // checksum
-            page.push(1); // segments
+            page.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
+            page.push(1); // segments placeholder
 
-            // Lacing values for packet
             let mut len_remaining = opus_data.len();
             while len_remaining >= 255 {
                 page.push(255);
@@ -227,10 +216,8 @@ pub async fn encode_opus_as_ogg<'a>(
             }
             page.push(len_remaining as u8);
 
-            // Update segment count in header (offset 26)
-            // But we already wrote it as 1... wait.
-            // If packet > 255, we have multiple segments for ONE packet.
-            let num_segments = page.len() - 27; // 27 is header start to segments count (26) + 1
+            // 27 = fixed header size (up to and including the segment count byte)
+            let num_segments = page.len() - 27;
             page[26] = num_segments as u8;
 
             page.extend_from_slice(&opus_data);
@@ -238,9 +225,22 @@ pub async fn encode_opus_as_ogg<'a>(
             let crc = ogg_crc.checksum(&page);
             page[22..26].copy_from_slice(&crc.to_le_bytes());
 
-            for byte in &page { yield *byte; }
+            if first {
+                first = false;
+                let mut buf = Vec::with_capacity(preamble.len() + page.len());
+                buf.extend_from_slice(&preamble);
+                buf.extend_from_slice(&page);
+                yield buf;
+            } else {
+                yield page;
+            }
 
             page_sequence += 1;
+        }
+
+        // If no audio packets, yield preamble alone.
+        if first {
+            yield preamble;
         }
     })
 }
@@ -287,9 +287,7 @@ pub fn make_tracks_element(sample_rate: u32) -> Vec<u8> {
     track_entry.extend_from_slice(&webm::make_uint_element(webm::TRACK_TYPE_ID, 2)); // Audio
     track_entry.extend_from_slice(&webm::make_string_element(webm::CODEC_ID_ID, "A_OPUS"));
 
-    // CodecDelay (Opus Pre-Skip)
-    // 6.5ms = 6,500,000ns
-    // 312 samples at 48k.
+    // CodecDelay (Opus Pre-Skip): 312 samples at 48k = 6.5ms
     let pre_skip = ((sample_rate as u64 * 312) / 48000) as u16;
     let codec_delay = 6_500_000u64; // 6.5ms in ns
     let seek_pre_roll = 80_000_000u64; // 80ms in ns
@@ -314,7 +312,7 @@ pub fn make_tracks_element(sample_rate: u32) -> Vec<u8> {
         &opus_head.to_bytes(),
     ));
 
-    // Audio
+    // Audio sub-element
     let mut audio = Vec::new();
     audio.extend_from_slice(&webm::make_float_element(
         webm::SAMPLING_FREQUENCY_ID,
@@ -334,29 +332,22 @@ pub async fn encode_opus_as_webm<'a>(
     sample_rate: u32,
     application: OpusApplication,
     bitrate: OpusBitrate,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
     let opus_packets = encode_opus_stream(samples, sample_rate, application, bitrate).await;
     let mut opus_packets = Box::pin(opus_packets);
 
     Box::pin(async_stream::stream! {
-        // 1. EBML Header
-        let ebml_header = make_webm_header();
-        for byte in ebml_header { yield byte; }
+        // Build the full WebM header (EBML + Segment + Info + Tracks) and
+        // prepend it to the first audio cluster so the first yielded chunk
+        // always contains audio data.
+        let mut preamble = Vec::new();
+        preamble.extend_from_slice(&make_webm_header());
+        preamble.extend_from_slice(&make_segment_header());
+        preamble.extend_from_slice(&make_info_element());
+        preamble.extend_from_slice(&make_tracks_element(sample_rate));
 
-        // 2. Segment (Unknown Size)
-        let segment_header = make_segment_header();
-        for byte in segment_header { yield byte; }
-
-        // 3. Info
-        let info_el = make_info_element();
-        for byte in info_el { yield byte; }
-
-        // 4. Tracks
-        let tracks_el = make_tracks_element(sample_rate);
-        for byte in tracks_el { yield byte; }
-
-        // 5. Clusters - one per packet for minimal latency
         let mut cluster_timecode = 0u64;
+        let mut first = true;
 
         while let Some(packet_result) = opus_packets.next().await {
             let packet = match packet_result {
@@ -371,10 +362,24 @@ pub async fn encode_opus_as_webm<'a>(
             cluster_data.extend_from_slice(&webm::make_uint_element(webm::TIMECODE_ID, cluster_timecode));
             cluster_data.extend_from_slice(&webm::make_simple_block(1, 0, &packet.data));
 
-            let cluster_el = webm::make_element(webm::CLUSTER_ID, &cluster_data);
-            for byte in cluster_el { yield byte; }
+            let cluster = webm::make_element(webm::CLUSTER_ID, &cluster_data);
+
+            if first {
+                first = false;
+                let mut buf = Vec::with_capacity(preamble.len() + cluster.len());
+                buf.extend_from_slice(&preamble);
+                buf.extend_from_slice(&cluster);
+                yield buf;
+            } else {
+                yield cluster;
+            }
 
             cluster_timecode += 20; // 20ms per frame
+        }
+
+        // If no audio packets were produced, yield the preamble alone.
+        if first {
+            yield preamble;
         }
     })
 }

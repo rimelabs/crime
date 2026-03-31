@@ -193,7 +193,7 @@ impl<'a> AudioStream<'a> {
     ///
     /// This method applies resampling and encoding to the audio stream according to the specified
     /// output sample rate and encoding format. It consumes the `AudioStream` and returns a stream
-    /// of encoded audio bytes.
+    /// of encoded audio byte chunks.
     ///
     /// # Arguments
     ///
@@ -204,13 +204,13 @@ impl<'a> AudioStream<'a> {
     ///
     /// # Returns
     ///
-    /// A pinned, boxed stream of encoded audio bytes (`u8`).
+    /// A pinned, boxed stream of encoded audio byte chunks (`Vec<u8>`).
     pub async fn commit(
         self,
         sample_rate: u32,
         time_scale_factor: f32,
         format: AudioFormat,
-    ) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+    ) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
         let time_scaled_stream = if (time_scale_factor - 1.0).abs() > f32::EPSILON {
             time_scale(self.stream, time_scale_factor, self.sample_rate).await
         } else {
@@ -286,7 +286,7 @@ async fn encode<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
     format: AudioFormat,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
     match format {
         #[cfg(feature = "pcm")]
         AudioFormat::Pcm(PcmEncoding::LinearPcm(pcm_encoding)) => {
@@ -320,14 +320,19 @@ async fn encode<'a>(
 #[cfg(feature = "pcm")]
 async fn encode_as_g711_mu_law<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
-    let mut samples = Box::pin(samples);
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
+    let samples = Box::pin(samples);
+    let mut sample_chunks = samples.ready_chunks(512);
     Box::pin(stream! {
-      while let Some(sample) = samples.next().await {
-        let s = sample.clamp(-1.0, 1.0);
-        // Scale to 16-bit linear PCM range
-        let pcm16 = (s * 32767.0).round() as i16;
-        yield encode_ulaw(pcm16);
+      while let Some(chunk) = sample_chunks.next().await {
+        let mut buf = Vec::with_capacity(chunk.len());
+        for sample in chunk {
+          let s = sample.clamp(-1.0, 1.0);
+          // Scale to 16-bit linear PCM range
+          let pcm16 = (s * 32767.0).round() as i16;
+          buf.push(encode_ulaw(pcm16));
+        }
+        yield buf;
       }
     })
 }
@@ -336,30 +341,32 @@ async fn encode_as_g711_mu_law<'a>(
 async fn encode_as_linear_pcm<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     bit_depth: LinearPcmEncoding,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
-    let mut samples = Box::pin(samples);
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
+    let samples = Box::pin(samples);
+    let mut sample_chunks = samples.ready_chunks(512);
+    let bytes_per_sample = match bit_depth {
+        LinearPcmEncoding::Float16 | LinearPcmEncoding::Int16 => 2,
+        LinearPcmEncoding::Float32 => 4,
+    };
     Box::pin(stream! {
-        while let Some(sample) = samples.next().await {
-            let sample = sample.clamp(-1.0, 1.0);
-            match bit_depth {
-                LinearPcmEncoding::Float16 => {
-                    let sample = f16::from_f32(sample);
-                    for byte in sample.to_le_bytes() {
-                        yield byte;
+        while let Some(chunk) = sample_chunks.next().await {
+            let mut buf = Vec::with_capacity(chunk.len() * bytes_per_sample);
+            for sample in chunk {
+                let sample = sample.clamp(-1.0, 1.0);
+                match bit_depth {
+                    LinearPcmEncoding::Float16 => {
+                        buf.extend_from_slice(&f16::from_f32(sample).to_le_bytes());
                     }
-                }
-                LinearPcmEncoding::Float32 => {
-                    for byte in sample.to_le_bytes() {
-                        yield byte;
+                    LinearPcmEncoding::Float32 => {
+                        buf.extend_from_slice(&sample.to_le_bytes());
                     }
-                }
-                LinearPcmEncoding::Int16 => {
-                    let sample = (sample * 32767.0).round() as i16;
-                    for byte in sample.to_le_bytes() {
-                        yield byte;
+                    LinearPcmEncoding::Int16 => {
+                        let s = (sample * 32767.0).round() as i16;
+                        buf.extend_from_slice(&s.to_le_bytes());
                     }
-                }
-            };
+                };
+            }
+            yield buf;
         }
     })
 }
@@ -402,14 +409,24 @@ async fn encode_as_wav<'a>(
     samples: impl Stream<Item = f32> + Send + 'a,
     sample_rate: u32,
     linear_pcm_encoding: LinearPcmEncoding,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
     Box::pin(stream! {
-        for &header_byte in &make_wav_header(sample_rate, &linear_pcm_encoding) {
-            yield header_byte;
-        }
+        let header = make_wav_header(sample_rate, &linear_pcm_encoding);
         let mut pcm_stream = encode_as_linear_pcm(samples, linear_pcm_encoding).await;
-        while let Some(sample) = pcm_stream.next().await {
-            yield sample;
+        // Prepend header to the first PCM chunk so the first yielded Vec
+        // always contains audio data (avoids a spurious early TTFB).
+        if let Some(first_chunk) = pcm_stream.next().await {
+            let mut buf = Vec::with_capacity(header.len() + first_chunk.len());
+            buf.extend_from_slice(&header);
+            buf.extend_from_slice(&first_chunk);
+            yield buf;
+        } else {
+            // No audio — yield header only.
+            yield header.to_vec();
+            return;
+        }
+        while let Some(chunk) = pcm_stream.next().await {
+            yield chunk;
         }
     })
 }
@@ -420,7 +437,7 @@ async fn encode_as_mp3<'a>(
     sample_rate: u32,
     bit_rate: Mp3BitRate,
     quality: Mp3Quality,
-) -> Pin<Box<dyn Stream<Item = u8> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Vec<u8>> + Send + 'a>> {
     let mut mp3_encoder = mp3lame_encoder::Builder::new().expect("Create LAME encoder");
     mp3_encoder.set_num_channels(1).expect("set channels");
     mp3_encoder.set_brate(bit_rate).expect("set bit_rate");
@@ -441,14 +458,13 @@ async fn encode_as_mp3<'a>(
         mp3_out_buffer.reserve(mp3lame_encoder::max_required_buffer_size(input.0.len()));
         mp3_encoder.encode_to_vec(input, &mut mp3_out_buffer).expect("To encode");
 
-        for sample in &mp3_out_buffer {
-          yield *sample;
+        if !mp3_out_buffer.is_empty() {
+          yield std::mem::take(&mut mp3_out_buffer);
         }
-        mp3_out_buffer.clear();
       }
       mp3_encoder.flush_to_vec::<mp3lame_encoder::FlushNoGap>(&mut mp3_out_buffer).expect("to flush");
-      for sample in &mp3_out_buffer {
-        yield *sample;
+      if !mp3_out_buffer.is_empty() {
+        yield mp3_out_buffer;
       }
     })
 }
