@@ -484,9 +484,7 @@ async fn encode_as_mp3<'a>(
 
 #[cfg(feature = "mp3")]
 fn reserve_output_capacity(buffer: &mut Vec<u8>, min_capacity: usize) {
-    if buffer.capacity() < min_capacity {
-        buffer.reserve(min_capacity - buffer.capacity());
-    }
+    buffer.reserve(min_capacity.saturating_sub(buffer.len()));
 }
 
 #[cfg(feature = "mp3")]
@@ -527,6 +525,15 @@ mod tests {
         reserve_output_capacity(&mut buffer, MP3_FLUSH_MIN_BUFFER_SIZE);
         assert!(buffer.capacity() >= previous_capacity);
         assert!(buffer.capacity() >= MP3_FLUSH_MIN_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn reserve_output_capacity_reaches_requested_minimum() {
+        let mut buffer = Vec::with_capacity(100);
+
+        reserve_output_capacity(&mut buffer, 200);
+
+        assert!(buffer.capacity() >= 200);
     }
 
     #[test]
