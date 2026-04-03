@@ -459,7 +459,7 @@ async fn encode_as_mp3<'a>(
 
         let encode_capacity =
             mp3lame_encoder::max_required_buffer_size(input.0.len());
-        reserve_output_capacity(&mut mp3_out_buffer, encode_capacity);
+        mp3_out_buffer.reserve(encode_capacity);
         mp3_encoder.encode_to_vec(input, &mut mp3_out_buffer).expect("To encode");
 
         if !mp3_out_buffer.is_empty() {
@@ -469,10 +469,7 @@ async fn encode_as_mp3<'a>(
           );
         }
       }
-      reserve_output_capacity(
-          &mut mp3_out_buffer,
-          MP3_FLUSH_MIN_BUFFER_SIZE,
-      );
+      mp3_out_buffer.reserve(MP3_FLUSH_MIN_BUFFER_SIZE);
       mp3_encoder
           .flush_to_vec::<mp3lame_encoder::FlushNoGap>(&mut mp3_out_buffer)
           .expect("to flush");
@@ -480,11 +477,6 @@ async fn encode_as_mp3<'a>(
         yield mp3_out_buffer;
       }
     })
-}
-
-#[cfg(feature = "mp3")]
-fn reserve_output_capacity(buffer: &mut Vec<u8>, min_capacity: usize) {
-    buffer.reserve(min_capacity.saturating_sub(buffer.len()));
 }
 
 #[cfg(feature = "mp3")]
@@ -497,7 +489,7 @@ fn take_output_chunk(buffer: &mut Vec<u8>, min_capacity: usize) -> Vec<u8> {
 mod tests {
     use super::{
         AudioFormat, AudioStream, MP3_FLUSH_MIN_BUFFER_SIZE, Mp3BitRate, Mp3Quality,
-        reserve_output_capacity, take_output_chunk,
+        take_output_chunk,
     };
     use futures::{StreamExt, executor::block_on, stream};
 
@@ -520,20 +512,7 @@ mod tests {
         assert_eq!(yielded, b"frame");
         assert!(buffer.is_empty());
         assert!(buffer.capacity() >= expected_capacity);
-
-        let previous_capacity = buffer.capacity();
-        reserve_output_capacity(&mut buffer, MP3_FLUSH_MIN_BUFFER_SIZE);
-        assert!(buffer.capacity() >= previous_capacity);
         assert!(buffer.capacity() >= MP3_FLUSH_MIN_BUFFER_SIZE);
-    }
-
-    #[test]
-    fn reserve_output_capacity_reaches_requested_minimum() {
-        let mut buffer = Vec::with_capacity(100);
-
-        reserve_output_capacity(&mut buffer, 200);
-
-        assert!(buffer.capacity() >= 200);
     }
 
     #[test]
