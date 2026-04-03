@@ -33,6 +33,8 @@ use wsola::time_scale;
 pub type Mp3BitRate = mp3lame_encoder::Bitrate;
 #[cfg(feature = "mp3")]
 pub type Mp3Quality = mp3lame_encoder::Quality;
+#[cfg(feature = "mp3")]
+const MP3_FLUSH_MIN_BUFFER_SIZE: usize = 7_200;
 
 #[cfg(any(feature = "ogg", feature = "webm"))]
 pub type OpusApplication = ::opus::Application;
@@ -455,16 +457,89 @@ async fn encode_as_mp3<'a>(
       while let Some(chunk) = sample_chunks.next().await {
         let input = mp3lame_encoder::MonoPcm(&chunk);
 
-        mp3_out_buffer.reserve(mp3lame_encoder::max_required_buffer_size(input.0.len()));
+        let encode_capacity =
+            mp3lame_encoder::max_required_buffer_size(input.0.len());
+        mp3_out_buffer.reserve(encode_capacity);
         mp3_encoder.encode_to_vec(input, &mut mp3_out_buffer).expect("To encode");
 
         if !mp3_out_buffer.is_empty() {
-          yield std::mem::take(&mut mp3_out_buffer);
+          yield take_output_chunk(
+              &mut mp3_out_buffer,
+              MP3_FLUSH_MIN_BUFFER_SIZE,
+          );
         }
       }
-      mp3_encoder.flush_to_vec::<mp3lame_encoder::FlushNoGap>(&mut mp3_out_buffer).expect("to flush");
+      mp3_out_buffer.reserve(MP3_FLUSH_MIN_BUFFER_SIZE);
+      mp3_encoder
+          .flush_to_vec::<mp3lame_encoder::FlushNoGap>(&mut mp3_out_buffer)
+          .expect("to flush");
       if !mp3_out_buffer.is_empty() {
         yield mp3_out_buffer;
       }
     })
+}
+
+#[cfg(feature = "mp3")]
+fn take_output_chunk(buffer: &mut Vec<u8>, min_capacity: usize) -> Vec<u8> {
+    let replacement_capacity = buffer.capacity().max(min_capacity);
+    std::mem::replace(buffer, Vec::with_capacity(replacement_capacity))
+}
+
+#[cfg(all(test, feature = "mp3"))]
+mod tests {
+    use super::{
+        AudioFormat, AudioStream, MP3_FLUSH_MIN_BUFFER_SIZE, Mp3BitRate, Mp3Quality,
+        take_output_chunk,
+    };
+    use futures::{StreamExt, executor::block_on, stream};
+
+    const INPUT_SAMPLE_RATE: u32 = 24_000;
+
+    fn sample_data(sample_count: usize) -> Vec<f32> {
+        (0..sample_count)
+            .map(|i| ((i as f32 * 0.137).sin() * 0.8).clamp(-1.0, 1.0))
+            .collect()
+    }
+
+    #[test]
+    fn take_output_chunk_preserves_capacity_for_flush() {
+        let mut buffer = Vec::with_capacity(MP3_FLUSH_MIN_BUFFER_SIZE + 123);
+        buffer.extend_from_slice(b"frame");
+
+        let expected_capacity = buffer.capacity();
+        let yielded = take_output_chunk(&mut buffer, MP3_FLUSH_MIN_BUFFER_SIZE);
+
+        assert_eq!(yielded, b"frame");
+        assert!(buffer.is_empty());
+        assert!(buffer.capacity() >= expected_capacity);
+        assert!(buffer.capacity() >= MP3_FLUSH_MIN_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn mp3_streaming_completes_after_intermediate_yields() {
+        block_on(async {
+            let chunks = AudioStream::new(INPUT_SAMPLE_RATE, stream::iter(sample_data(96_000)))
+                .commit(
+                    INPUT_SAMPLE_RATE,
+                    1.0,
+                    AudioFormat::Mp3(Mp3BitRate::Kbps192, Mp3Quality::Best),
+                )
+                .await
+                .collect::<Vec<_>>()
+                .await;
+
+            assert!(
+                chunks.len() > 1,
+                "expected at least one chunk before the final flush"
+            );
+            assert!(
+                chunks.iter().all(|chunk| !chunk.is_empty()),
+                "expected all emitted MP3 chunks to be non-empty"
+            );
+            assert!(
+                chunks.iter().map(Vec::len).sum::<usize>() > 0,
+                "expected MP3 stream to produce bytes"
+            );
+        });
+    }
 }
