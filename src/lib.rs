@@ -8,6 +8,7 @@
 //!   - Audio inputs as `f32` samples
 //!   - Resampling audio streams to different sample rates
 //!   - Encoding audio streams to various formats (PCM, WAV, MP3)
+//!   - Decoding G.711 μ-law into PCM as it arrives ([`G711MuLawDecoder`])
 //!
 //! The main entry point is [`AudioStream`].
 
@@ -22,6 +23,10 @@ use half::f16;
 use rubato::{Fft, FixedSync, Resampler};
 use std::fmt::Debug;
 use std::pin::Pin;
+#[cfg(feature = "pcm")]
+mod decode;
+#[cfg(feature = "pcm")]
+pub use decode::G711MuLawDecoder;
 #[cfg(any(feature = "ogg", feature = "webm"))]
 mod opus;
 #[cfg(feature = "webm")]
