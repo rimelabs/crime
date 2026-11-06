@@ -17,6 +17,7 @@ Current functionalities:
 * Resampling.
 * Streaming audio codec (PCM, WAV, MP3, Ogg/Opus, WebM/Opus).
 * Time scaling (using WSOLA).
+* Decoding G.711 μ-law at 8 kHz into 16 kHz PCM as it arrives (`G711MuLawDecoder`, with `pcm`).
 
 ## Feature flags
 
